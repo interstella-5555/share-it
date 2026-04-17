@@ -1,0 +1,15 @@
+{
+  "name": "share-it",
+  "description": "Claude Code marketplace for the share-it plugin",
+  "owner": { "name": "interstella-5555" },
+  "metadata": { "version": "0.1.0", "pluginRoot": "./plugins" },
+  "plugins": [
+    {
+      "name": "share-it",
+      "description": "Upload, share, and update files via a share-it API instance. Handles first-run setup (prompts for base URL + API key, stores config in ~/.share-it/), picks the right file from the conversation, and uses GET /files to detect updates to existing uploads.",
+      "source": "./plugins/share-it",
+      "category": "productivity",
+      "keywords": ["file-sharing", "upload", "share-it", "http"]
+    }
+  ]
+}

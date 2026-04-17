@@ -1,0 +1,612 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "share-it",
+    "version": "0.1.0",
+    "description": "File hosting API. Upload files and get stable URLs. Files are versioned; API-key uploads can be updated. Protected mode (default) blocks unknown keys to prevent spam. Admin endpoints manage the key lifecycle.",
+    "license": { "name": "Unlicense", "identifier": "Unlicense" }
+  },
+  "servers": [
+    {
+      "url": "{baseUrl}",
+      "variables": { "baseUrl": { "default": "http://localhost:3847" } }
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "apiKeyHeader": { "type": "apiKey", "name": "X-API-Key", "in": "header" },
+      "bearerAuth": { "type": "http", "scheme": "bearer" },
+      "adminKey": { "type": "apiKey", "name": "X-Admin-Key", "in": "header" }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["success", "error"],
+        "properties": {
+          "success": { "type": "boolean", "enum": [false] },
+          "error": { "type": "string" }
+        }
+      },
+      "SuccessBase": {
+        "type": "object",
+        "required": ["success"],
+        "properties": { "success": { "type": "boolean", "enum": [true] } }
+      },
+      "EmptySuccess": {
+        "allOf": [{ "$ref": "#/components/schemas/SuccessBase" }]
+      },
+      "UploadResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/SuccessBase" },
+          {
+            "type": "object",
+            "required": ["url", "shortUrl", "id", "shortId", "version"],
+            "properties": {
+              "url": { "type": "string", "format": "uri" },
+              "shortUrl": {
+                "type": "string",
+                "format": "uri",
+                "description": "Short URL variant of `url`, using the shortId segment. Same resource, fewer bytes."
+              },
+              "id": { "type": "string", "format": "uuid" },
+              "shortId": {
+                "type": "string",
+                "pattern": "^[0-9A-Za-z]{10,16}$",
+                "description": "Deterministic base62-encoded short id derived from `id` (sha256 → base62, 10-16 chars, case-sensitive)."
+              },
+              "version": { "type": "integer", "minimum": 1 }
+            }
+          }
+        ]
+      },
+      "KeyStatus": {
+        "type": "string",
+        "enum": ["active", "inactive", "suspended"]
+      },
+      "ApiKey": {
+        "type": "object",
+        "required": ["apiKey", "status", "createdAt"],
+        "properties": {
+          "apiKey": { "type": "string", "format": "uuid" },
+          "status": { "$ref": "#/components/schemas/KeyStatus" },
+          "createdAt": {
+            "type": "integer",
+            "description": "unix epoch milliseconds"
+          }
+        }
+      },
+      "EnvelopedApiKey": {
+        "allOf": [
+          { "$ref": "#/components/schemas/SuccessBase" },
+          { "$ref": "#/components/schemas/ApiKey" }
+        ]
+      },
+      "EnvelopedApiKeyWithStats": {
+        "allOf": [
+          { "$ref": "#/components/schemas/SuccessBase" },
+          { "$ref": "#/components/schemas/ApiKeyWithStats" }
+        ]
+      },
+      "EnvelopedApiKeyList": {
+        "allOf": [
+          { "$ref": "#/components/schemas/SuccessBase" },
+          {
+            "type": "object",
+            "required": ["keys"],
+            "properties": {
+              "keys": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/ApiKeyWithStats" }
+              }
+            }
+          }
+        ]
+      },
+      "FileListRow": {
+        "type": "object",
+        "required": [
+          "id",
+          "shortId",
+          "originalName",
+          "latestVersion",
+          "size",
+          "lastUploadAt"
+        ],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "shortId": {
+            "type": "string",
+            "pattern": "^[0-9A-Za-z]{10,16}$",
+            "description": "Deterministic base62-encoded short id derived from `id`. Case-sensitive."
+          },
+          "originalName": { "type": "string" },
+          "latestVersion": { "type": "integer", "minimum": 1 },
+          "size": { "type": "integer", "minimum": 0 },
+          "lastUploadAt": {
+            "type": "integer",
+            "description": "unix epoch milliseconds of the most recent version"
+          }
+        }
+      },
+      "EnvelopedFileList": {
+        "allOf": [
+          { "$ref": "#/components/schemas/SuccessBase" },
+          {
+            "type": "object",
+            "required": ["files"],
+            "properties": {
+              "files": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/FileListRow" }
+              }
+            }
+          }
+        ]
+      },
+      "ApiKeyWithStats": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ApiKey" },
+          {
+            "type": "object",
+            "required": ["fileCount", "versionCount"],
+            "properties": {
+              "fileCount": { "type": "integer", "minimum": 0 },
+              "versionCount": { "type": "integer", "minimum": 0 }
+            }
+          }
+        ]
+      },
+      "RotateResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/SuccessBase" },
+          {
+            "type": "object",
+            "required": ["oldKey", "newKey", "filesTransferred"],
+            "properties": {
+              "oldKey": { "type": "string", "format": "uuid" },
+              "newKey": { "type": "string", "format": "uuid" },
+              "filesTransferred": { "type": "integer", "minimum": 0 }
+            }
+          }
+        ]
+      },
+      "RootResponse": {
+        "type": "object",
+        "required": ["name", "version", "openapi", "docs"],
+        "properties": {
+          "name": { "type": "string" },
+          "version": { "type": "string" },
+          "openapi": { "type": "string" },
+          "docs": { "type": "string" }
+        }
+      }
+    },
+    "responses": {
+      "ErrorJson": {
+        "description": "Error response",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      },
+      "EmptySuccessJson": {
+        "description": "Empty success envelope",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/EmptySuccess" }
+          }
+        }
+      }
+    },
+    "parameters": {
+      "IdPath": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "Either a canonical UUID (case-insensitive, lowercased at the boundary) or a deterministic base62 shortId (10-16 chars, case-sensitive). Both address the same file.",
+        "schema": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|[0-9A-Za-z]{10,16})$"
+        }
+      },
+      "VersionPath": {
+        "name": "version",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "integer", "minimum": 1 }
+      },
+      "KeyPath": {
+        "name": "key",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+      }
+    }
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "summary": "Self-describing root (discovery)",
+        "responses": {
+          "200": {
+            "description": "Pointer to OpenAPI",
+            "headers": {
+              "Link": {
+                "description": "RFC 8631 service-desc link",
+                "schema": {
+                  "type": "string",
+                  "example": "</openapi.json>; rel=\"service-desc\""
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RootResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/share": {
+      "post": {
+        "summary": "Upload or update a file",
+        "security": [{ "apiKeyHeader": [] }, { "bearerAuth": [] }, {}],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": false,
+            "description": "Target id for new upload or update. Accepts a UUID (new file can be created under that id, or an existing file is updated) or a shortId (must match an existing file — cannot create new files).",
+            "schema": {
+              "type": "string",
+              "pattern": "^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|[0-9A-Za-z]{10,16})$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": { "type": "string", "format": "binary" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Upload succeeded (new file, new version, or dedup no-op)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UploadResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ErrorJson" },
+          "401": { "$ref": "#/components/responses/ErrorJson" },
+          "403": { "$ref": "#/components/responses/ErrorJson" },
+          "404": {
+            "$ref": "#/components/responses/ErrorJson",
+            "description": "shortId query param didn't match an existing file. Only UUIDs can create new files."
+          },
+          "413": { "$ref": "#/components/responses/ErrorJson" },
+          "415": { "$ref": "#/components/responses/ErrorJson" }
+        }
+      }
+    },
+    "/files": {
+      "get": {
+        "summary": "List files owned by the caller's API key",
+        "description": "Returns files whose versions still exist (tombstones after DELETE are excluded), sorted by last-upload time descending. Each row reflects the MOST RECENT version's originalName, size, and createdAt. Requires an active API key via X-Api-Key or Authorization: Bearer.",
+        "security": [{ "apiKeyHeader": [] }, { "bearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "List of owned files",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EnvelopedFileList" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ErrorJson" },
+          "401": { "$ref": "#/components/responses/ErrorJson" },
+          "403": { "$ref": "#/components/responses/ErrorJson" }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "OpenAPI 3.1 specification",
+        "responses": {
+          "200": {
+            "description": "OpenAPI document",
+            "content": {
+              "application/json": { "schema": { "type": "object" } }
+            }
+          }
+        }
+      }
+    },
+    "/docs": {
+      "get": {
+        "summary": "Human-readable API reference (Scalar renderer)",
+        "description": "Serves a static HTML page that loads @scalar/api-reference from a CDN and renders this openapi.json. Same-origin — works on any deployment without config.",
+        "responses": {
+          "200": {
+            "description": "HTML documentation page",
+            "content": {
+              "text/html": { "schema": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Healthcheck",
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "text/plain": { "schema": { "type": "string", "example": "ok" } }
+            }
+          }
+        }
+      }
+    },
+    "/share/{id}": {
+      "get": {
+        "summary": "Serve latest version",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdPath" },
+          {
+            "name": "download",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Any presence triggers Content-Disposition: attachment"
+          }
+        ],
+        "responses": {
+          "200": { "description": "File bytes" },
+          "304": { "description": "Not Modified (If-None-Match matched ETag)" },
+          "400": { "$ref": "#/components/responses/ErrorJson" },
+          "404": { "$ref": "#/components/responses/ErrorJson" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a file (all versions + blobs, keep URL reserved)",
+        "description": "Removes every version row and every blob but keeps the files row as a tombstone so the URL stays reserved to its original owner. Anonymous files (uploaded without an API key) are admin-only. Owner needs an active X-Api-Key; admin can delete anyone's file.",
+        "security": [
+          { "apiKeyHeader": [] },
+          { "bearerAuth": [] },
+          { "adminKey": [] }
+        ],
+        "parameters": [{ "$ref": "#/components/parameters/IdPath" }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/EmptySuccessJson" },
+          "400": { "$ref": "#/components/responses/ErrorJson" },
+          "401": { "$ref": "#/components/responses/ErrorJson" },
+          "403": { "$ref": "#/components/responses/ErrorJson" },
+          "404": { "$ref": "#/components/responses/ErrorJson" }
+        }
+      }
+    },
+    "/share/{id}/{version}": {
+      "get": {
+        "summary": "Serve a specific version",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdPath" },
+          { "$ref": "#/components/parameters/VersionPath" },
+          {
+            "name": "download",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "File bytes" },
+          "304": { "description": "Not Modified" },
+          "400": { "$ref": "#/components/responses/ErrorJson" },
+          "404": { "$ref": "#/components/responses/ErrorJson" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a single version of a file",
+        "description": "Removes one version row and its blob. The files row is intentionally kept so the URL stays reserved to its original owner even if this was the last remaining version. Version numbers are never reused; subsequent uploads use MAX(version)+1. Anonymous files are admin-only.",
+        "security": [
+          { "apiKeyHeader": [] },
+          { "bearerAuth": [] },
+          { "adminKey": [] }
+        ],
+        "parameters": [
+          { "$ref": "#/components/parameters/IdPath" },
+          { "$ref": "#/components/parameters/VersionPath" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/EmptySuccessJson" },
+          "400": { "$ref": "#/components/responses/ErrorJson" },
+          "401": { "$ref": "#/components/responses/ErrorJson" },
+          "403": { "$ref": "#/components/responses/ErrorJson" },
+          "404": { "$ref": "#/components/responses/ErrorJson" }
+        }
+      }
+    },
+    "/admin/keys": {
+      "get": {
+        "summary": "List API keys (with stats)",
+        "security": [{ "adminKey": [] }],
+        "responses": {
+          "200": {
+            "description": "Enveloped list of keys",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EnvelopedApiKeyList" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/ErrorJson" },
+          "404": { "description": "Admin API disabled (ADMIN_KEY env unset)" }
+        }
+      },
+      "post": {
+        "summary": "Create an API key",
+        "security": [{ "adminKey": [] }],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "apiKey": { "type": "string", "format": "uuid" },
+                  "status": { "$ref": "#/components/schemas/KeyStatus" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EnvelopedApiKey" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ErrorJson" },
+          "401": { "$ref": "#/components/responses/ErrorJson" },
+          "409": { "$ref": "#/components/responses/ErrorJson" },
+          "404": { "description": "Admin API disabled" }
+        }
+      }
+    },
+    "/admin/keys/{key}": {
+      "get": {
+        "summary": "Get a single API key (with stats)",
+        "security": [{ "adminKey": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/KeyPath" }],
+        "responses": {
+          "200": {
+            "description": "Key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvelopedApiKeyWithStats"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ErrorJson" },
+          "401": { "$ref": "#/components/responses/ErrorJson" },
+          "404": { "$ref": "#/components/responses/ErrorJson" }
+        }
+      },
+      "patch": {
+        "summary": "Change key status",
+        "security": [{ "adminKey": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/KeyPath" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["status"],
+                "properties": {
+                  "status": { "$ref": "#/components/schemas/KeyStatus" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvelopedApiKeyWithStats"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ErrorJson" },
+          "401": { "$ref": "#/components/responses/ErrorJson" },
+          "404": { "$ref": "#/components/responses/ErrorJson" }
+        }
+      },
+      "delete": {
+        "summary": "Hard delete a key (409 if referenced, unless cascade=true)",
+        "security": [{ "adminKey": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/KeyPath" },
+          {
+            "name": "cascade",
+            "in": "query",
+            "required": false,
+            "description": "When 'true' (exact string), also delete every file owned by this key (rows, versions, blobs). Frees those URLs for anyone to claim.",
+            "schema": { "type": "string", "enum": ["true"] }
+          }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/EmptySuccessJson" },
+          "400": { "$ref": "#/components/responses/ErrorJson" },
+          "401": { "$ref": "#/components/responses/ErrorJson" },
+          "404": { "$ref": "#/components/responses/ErrorJson" },
+          "409": { "$ref": "#/components/responses/ErrorJson" },
+          "500": { "$ref": "#/components/responses/ErrorJson" }
+        }
+      }
+    },
+    "/admin/keys/{oldKey}/rotate": {
+      "post": {
+        "summary": "Rotate a key: transfer ownership to a new key",
+        "security": [{ "adminKey": [] }],
+        "parameters": [
+          {
+            "name": "oldKey",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "newKey": { "type": "string", "format": "uuid" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Rotated",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RotateResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ErrorJson" },
+          "401": { "$ref": "#/components/responses/ErrorJson" },
+          "404": { "$ref": "#/components/responses/ErrorJson" },
+          "409": { "$ref": "#/components/responses/ErrorJson" }
+        }
+      }
+    }
+  }
+}

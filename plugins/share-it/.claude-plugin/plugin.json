@@ -1,0 +1,6 @@
+{
+  "name": "share-it",
+  "description": "Upload, share, and update files via a share-it API instance from Claude Code. Includes first-run interactive setup, smart file-from-context selection, and server-side update detection via GET /files.",
+  "author": { "name": "interstella-5555" },
+  "repository": "https://github.com/interstella-5555/share-it"
+}
