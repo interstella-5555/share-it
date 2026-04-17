@@ -32,18 +32,40 @@ Lives at `~/.share-it/config.json`, mode `600`:
 
 2. **Read the config.** `jq -r '.baseUrl,.apiKey' ~/.share-it/config.json`. If the file is missing or unparseable, skip to **Recover from failure** with cause = `no-config`.
 
-3. **POST the file.**
+3. **Resolve the MIME type from the file extension.** DO NOT rely on curl's default — on macOS curl often sends `application/octet-stream` for extensions not listed in `/etc/mime.types` (`.md`, `.json` etc.), and the server rejects that with `415`. Use this mapping — every upload MUST pass explicit `;type=<mime>`:
+
+   | Extension          | MIME to pass       |
+   | ------------------ | ------------------ |
+   | `.html`, `.htm`    | `text/html`        |
+   | `.txt`             | `text/plain`       |
+   | `.md`, `.markdown` | `text/markdown`    |
+   | `.json`            | `application/json` |
+   | `.png`             | `image/png`        |
+   | `.jpg`, `.jpeg`    | `image/jpeg`       |
+   | `.gif`             | `image/gif`        |
+
+   Anything else → tell the user the file type isn't supported; don't bother hitting the server.
+
+4. **POST the file.**
 
    ```bash
    curl -sS -X POST \
      -H "X-Api-Key: $API_KEY" \
-     -F "file=@<absolute-path>" \
+     -F "file=@<absolute-path>;type=<resolved-mime>" \
      "$BASE_URL/share"
    ```
 
-   For explicit updates with a known id: append `?id=<known-id>`. Parse the response JSON. Success: `{ "success": true, "url", "shortUrl", "id", "shortId", "version" }`.
+   Concrete:
 
-4. **Report.** One line, prefixed with 🔗:
+   ```bash
+   curl -sS -X POST -H "X-Api-Key: $API_KEY" \
+     -F 'file=@/Users/you/notes.md;type=text/markdown' \
+     "$BASE_URL/share"
+   ```
+
+   For explicit updates with a known id: append `?id=<known-id-or-shortId>`. Parse the response JSON. Success: `{ "success": true, "url", "shortUrl", "id", "shortId", "version" }`.
+
+5. **Report.** One line, prefixed with 🔗:
 
    ```
    🔗 <file-path> → <shortUrl> [ (v<N>) ]
@@ -66,7 +88,7 @@ Lives at `~/.share-it/config.json`, mode `600`:
    🔗 ~/pitch.html   → https://share.example.app/share/zXcVbNm3aS (v5)
    ```
 
-5. **If the HTTP call fails** (non-200 status, network error, unparseable body) → **Recover from failure**.
+6. **If the HTTP call fails** (non-200 status, network error, unparseable body) → **Recover from failure**.
 
 ## Recover from failure
 
@@ -197,9 +219,11 @@ When the update target is known (from session context):
 ```bash
 curl -sS -X POST \
   -H "X-Api-Key: $API_KEY" \
-  -F "file=@<absolute-path>" \
+  -F "file=@<absolute-path>;type=<resolved-mime>" \
   "$BASE_URL/share?id=<known-id-or-shortId>"
 ```
+
+(Same MIME-from-extension rule as new uploads — see the mapping table above.)
 
 If `version > 1` in the response, include it in the report line.
 
@@ -252,7 +276,7 @@ When the user asks to update but the id isn't in the session context:
 
 ## Content-type and filename rules
 
-Server validates both the extension AND the declared `Content-Type`. `curl -F "file=@path"` sets the type from the extension automatically — that's what we want. No manual `;type=` override needed.
+Server validates both the extension AND the declared `Content-Type`. **curl's default Content-Type detection is unreliable** — on macOS it falls back to `application/octet-stream` for `.md`, `.json`, and other extensions that `/etc/mime.types` doesn't cover. To avoid a wasted `415` roundtrip, always pass explicit `;type=<mime>` using the extension→MIME table from the Upload flow. The table and the `curl` example there are the source of truth — don't guess, don't rely on curl auto-detection.
 
 Allowed extensions: `.html` / `.htm`, `.txt`, `.md`, `.json`, `.png`, `.jpg` / `.jpeg`, `.gif`. Anything else → `415` surfaced to the user.
 
