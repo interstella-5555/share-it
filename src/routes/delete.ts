@@ -45,6 +45,7 @@ export async function handleDelete(
     }
     db.transaction(() => {
       db.deleteAllVersionsOfFile(file.id);
+      db.deleteAnalyticsForFile(file.id);
     });
     return ok();
   }
@@ -69,6 +70,6 @@ export async function handleDelete(
     console.error("unlink failed during version delete:", e);
     return err(500, "Storage error");
   }
-
+  db.deleteAnalyticsForVersion(file.id, version);
   return ok();
 }

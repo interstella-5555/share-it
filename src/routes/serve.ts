@@ -1,5 +1,6 @@
 import type { Config } from "../config";
 import type { Db } from "../db";
+import { clientIp, hashIpDay, utcDay } from "../analytics";
 import { err } from "../http";
 import { pathForBlob } from "../storage";
 import { resolveFile } from "./shared";
@@ -16,6 +17,8 @@ export async function handleServe(
   url: URL,
   config: Config,
   db: Db,
+  server: import("bun").Server<unknown>,
+  salt: string,
 ): Promise<Response> {
   const parts = url.pathname.split("/").filter((s) => s.length > 0);
   // path is /share/:id[/:version]
@@ -58,6 +61,20 @@ export async function handleServe(
 
   const etag = `"${row.hash}"`;
   if (req.headers.get("if-none-match") === etag) {
+    const day304 = utcDay(Date.now());
+    const ip304 = clientIp(req, server);
+    queueMicrotask(() => {
+      try {
+        db.recordView(
+          file.id,
+          targetVersion,
+          day304,
+          hashIpDay(salt, ip304, day304),
+        );
+      } catch (e) {
+        console.error("analytics recordView failed:", e);
+      }
+    });
     return new Response(null, { status: 304, headers: { ETag: etag } });
   }
 
@@ -85,5 +102,16 @@ export async function handleServe(
 
   const path = pathForBlob(config.filesDir, file.id, targetVersion, row.ext);
   const stream = Bun.file(path).stream();
+
+  const day = utcDay(Date.now());
+  const ip = clientIp(req, server);
+  queueMicrotask(() => {
+    try {
+      db.recordView(file.id, targetVersion, day, hashIpDay(salt, ip, day));
+    } catch (e) {
+      console.error("analytics recordView failed:", e);
+    }
+  });
+
   return new Response(stream, { status: 200, headers });
 }

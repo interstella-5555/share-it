@@ -179,6 +179,57 @@
           "openapi": { "type": "string" },
           "docs": { "type": "string" }
         }
+      },
+      "FileAnalytics": {
+        "type": "object",
+        "required": [
+          "success",
+          "fileId",
+          "shortId",
+          "totals",
+          "perDay",
+          "perVersion"
+        ],
+        "properties": {
+          "success": { "type": "boolean", "enum": [true] },
+          "fileId": { "type": "string", "format": "uuid" },
+          "shortId": { "type": "string", "minLength": 10, "maxLength": 16 },
+          "totals": {
+            "type": "object",
+            "required": ["views", "uniqueDaily"],
+            "properties": {
+              "views": { "type": "integer", "minimum": 0 },
+              "uniqueDaily": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "perDay": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["day", "views", "uniqueDaily"],
+              "properties": {
+                "day": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                },
+                "views": { "type": "integer", "minimum": 0 },
+                "uniqueDaily": { "type": "integer", "minimum": 0 }
+              }
+            }
+          },
+          "perVersion": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["version", "views", "uniqueDaily"],
+              "properties": {
+                "version": { "type": "integer", "minimum": 1 },
+                "views": { "type": "integer", "minimum": 0 },
+                "uniqueDaily": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        }
       }
     },
     "responses": {
@@ -317,6 +368,46 @@
           "400": { "$ref": "#/components/responses/ErrorJson" },
           "401": { "$ref": "#/components/responses/ErrorJson" },
           "403": { "$ref": "#/components/responses/ErrorJson" }
+        }
+      }
+    },
+    "/files/{id}/analytics": {
+      "get": {
+        "summary": "Get view analytics for a file",
+        "description": "Returns total views, daily breakdown, and per-version breakdown. Accessible by the file's owner (x-api-key) or admin (x-admin-key).",
+        "operationId": "getFileAnalytics",
+        "security": [
+          { "apiKeyHeader": [] },
+          { "bearerAuth": [] },
+          { "adminKey": [] }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "oneOf": [
+                { "type": "string", "format": "uuid" },
+                { "type": "string", "minLength": 10, "maxLength": 16 }
+              ]
+            },
+            "description": "File identifier — UUID v4 or base62 shortId (10-16 chars)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Analytics for the file",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/FileAnalytics" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ErrorJson" },
+          "401": { "$ref": "#/components/responses/ErrorJson" },
+          "403": { "$ref": "#/components/responses/ErrorJson" },
+          "404": { "$ref": "#/components/responses/ErrorJson" }
         }
       }
     },

@@ -49,6 +49,26 @@ export interface FileListRow {
   lastUploadAt: number;
 }
 
+export interface AnalyticsTotals {
+  views: number;
+  uniqueDaily: number;
+}
+export interface AnalyticsPerDay {
+  day: string;
+  views: number;
+  uniqueDaily: number;
+}
+export interface AnalyticsPerVersion {
+  version: number;
+  views: number;
+  uniqueDaily: number;
+}
+export interface FileAnalytics {
+  totals: AnalyticsTotals;
+  perDay: AnalyticsPerDay[];
+  perVersion: AnalyticsPerVersion[];
+}
+
 export class Db {
   private db: Database;
 
@@ -87,6 +107,24 @@ export class Db {
       );
       CREATE INDEX IF NOT EXISTS idx_versions_hash ON versions(fileId, hash);
       CREATE INDEX IF NOT EXISTS idx_files_apiKey  ON files(apiKey);
+      CREATE TABLE IF NOT EXISTS viewUniques (
+        fileId    TEXT    NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        version   INTEGER NOT NULL,
+        day       TEXT    NOT NULL,
+        ipHashDay TEXT    NOT NULL,
+        PRIMARY KEY (fileId, version, day, ipHashDay)
+      );
+      CREATE INDEX IF NOT EXISTS idx_viewUniques_file_day
+        ON viewUniques(fileId, day);
+      CREATE TABLE IF NOT EXISTS viewCounters (
+        fileId  TEXT    NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL,
+        day     TEXT    NOT NULL,
+        views   INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (fileId, version, day)
+      );
+      CREATE INDEX IF NOT EXISTS idx_viewCounters_file
+        ON viewCounters(fileId);
     `);
 
     // Idempotent shortId migration. SQLite's ALTER TABLE has no "IF NOT
@@ -384,6 +422,90 @@ export class Db {
     this.db
       .query<unknown, [string]>("DELETE FROM files WHERE id = ?")
       .run(fileId);
+  }
+
+  recordView(
+    fileId: string,
+    version: number,
+    day: string,
+    ipHashDay: string,
+  ): void {
+    this.transaction(() => {
+      this.db
+        .query(
+          `INSERT OR IGNORE INTO viewUniques (fileId, version, day, ipHashDay)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(fileId, version, day, ipHashDay);
+
+      this.db
+        .query(
+          `INSERT INTO viewCounters (fileId, version, day, views)
+           VALUES (?, ?, ?, 1)
+           ON CONFLICT (fileId, version, day)
+           DO UPDATE SET views = views + 1`,
+        )
+        .run(fileId, version, day);
+    });
+  }
+
+  getFileAnalytics(fileId: string): FileAnalytics {
+    const totals = this.db
+      .query<AnalyticsTotals, [string, string]>(
+        `SELECT
+           COALESCE((SELECT SUM(views) FROM viewCounters WHERE fileId = ?), 0) AS views,
+           (SELECT COUNT(DISTINCT day || '|' || ipHashDay)
+              FROM viewUniques WHERE fileId = ?) AS uniqueDaily`,
+      )
+      .get(fileId, fileId)!;
+
+    const perDay = this.db
+      .query<AnalyticsPerDay, [string, string]>(
+        `SELECT
+           c.day                                                    AS day,
+           SUM(c.views)                                             AS views,
+           (SELECT COUNT(DISTINCT ipHashDay) FROM viewUniques u
+            WHERE u.fileId = ? AND u.day = c.day)                   AS uniqueDaily
+         FROM viewCounters c
+         WHERE c.fileId = ?
+         GROUP BY c.day
+         ORDER BY c.day ASC`,
+      )
+      .all(fileId, fileId);
+
+    const perVersion = this.db
+      .query<AnalyticsPerVersion, [string, string]>(
+        `SELECT
+           c.version                                                AS version,
+           SUM(c.views)                                             AS views,
+           (SELECT COUNT(*) FROM viewUniques u
+            WHERE u.fileId = ? AND u.version = c.version)           AS uniqueDaily
+         FROM viewCounters c
+         WHERE c.fileId = ?
+         GROUP BY c.version
+         ORDER BY c.version ASC`,
+      )
+      .all(fileId, fileId);
+
+    return { totals, perDay, perVersion };
+  }
+
+  deleteAnalyticsForFile(fileId: string): void {
+    this.transaction(() => {
+      this.db.query("DELETE FROM viewCounters WHERE fileId = ?").run(fileId);
+      this.db.query("DELETE FROM viewUniques  WHERE fileId = ?").run(fileId);
+    });
+  }
+
+  deleteAnalyticsForVersion(fileId: string, version: number): void {
+    this.transaction(() => {
+      this.db
+        .query("DELETE FROM viewCounters WHERE fileId = ? AND version = ?")
+        .run(fileId, version);
+      this.db
+        .query("DELETE FROM viewUniques  WHERE fileId = ? AND version = ?")
+        .run(fileId, version);
+    });
   }
 
   listFileIdsByApiKey(apiKey: string): string[] {

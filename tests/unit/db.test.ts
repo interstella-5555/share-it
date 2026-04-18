@@ -1,6 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Db } from "../../src/db";
@@ -215,6 +216,92 @@ describe("shortId", () => {
   });
 });
 
+describe("Db bootstrap — analytics tables", () => {
+  let analyticsDir: string;
+  let analyticsDbPath: string;
+  beforeEach(async () => {
+    analyticsDir = await mkdtemp(join(tmpdir(), "es-db-"));
+    analyticsDbPath = join(analyticsDir, "db.sqlite");
+  });
+  afterEach(async () => {
+    await rm(analyticsDir, { recursive: true, force: true });
+  });
+
+  test("creates viewUniques and viewCounters", () => {
+    const analyticsDb = new Db(analyticsDbPath);
+    const raw = (
+      analyticsDb as unknown as {
+        db: { query: <T>(sql: string) => { all: () => T[] } };
+      }
+    ).db;
+    const tables = raw
+      .query<{ name: string }>(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name",
+      )
+      .all()
+      .map((r) => r.name);
+    expect(tables).toContain("viewUniques");
+    expect(tables).toContain("viewCounters");
+    analyticsDb.close();
+  });
+});
+
+describe("Db.recordView()", () => {
+  let vdir: string;
+  let vdb: Db;
+  const FID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const DAY = "2026-04-18";
+  const HASH_A = "a".repeat(64);
+  const HASH_B = "b".repeat(64);
+
+  beforeEach(async () => {
+    vdir = await mkdtemp(join(tmpdir(), "es-db-"));
+    vdb = new Db(join(vdir, "db.sqlite"));
+    vdb.insertFile(FID, null);
+  });
+  afterEach(async () => {
+    vdb.close();
+    await rm(vdir, { recursive: true, force: true });
+  });
+
+  function rawCounts() {
+    const raw = (
+      vdb as unknown as {
+        db: {
+          query: <T>(s: string) => { get: () => T | null };
+        };
+      }
+    ).db;
+    const u =
+      raw.query<{ c: number }>("SELECT COUNT(*) AS c FROM viewUniques").get()
+        ?.c ?? 0;
+    const v =
+      raw
+        .query<{
+          v: number;
+        }>("SELECT COALESCE(SUM(views),0) AS v FROM viewCounters")
+        .get()?.v ?? 0;
+    return { u, v };
+  }
+
+  test("first call inserts unique row + counter=1", () => {
+    vdb.recordView(FID, 1, DAY, HASH_A);
+    expect(rawCounts()).toEqual({ u: 1, v: 1 });
+  });
+
+  test("same (file, version, day, ip) hit twice: unique stays 1, counter=2", () => {
+    vdb.recordView(FID, 1, DAY, HASH_A);
+    vdb.recordView(FID, 1, DAY, HASH_A);
+    expect(rawCounts()).toEqual({ u: 1, v: 2 });
+  });
+
+  test("different ip same (file,version,day): unique=2, counter=2", () => {
+    vdb.recordView(FID, 1, DAY, HASH_A);
+    vdb.recordView(FID, 1, DAY, HASH_B);
+    expect(rawCounts()).toEqual({ u: 2, v: 2 });
+  });
+});
+
 describe("countFilesByApiKey", () => {
   test("returns 0 when no files, N otherwise", () => {
     db.insertApiKey(KEY_1, "active");
@@ -307,5 +394,108 @@ describe("delete helpers", () => {
     db.insertFile(F6, K1);
     db.insertFile(F7, null);
     expect(db.listFileIdsByApiKey(K1).sort()).toEqual([F5, F6].sort());
+  });
+});
+
+describe("Db analytics cleanup", () => {
+  let vdir: string;
+  let vdb: Db;
+  const FID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const HASH = "a".repeat(64);
+
+  beforeEach(() => {
+    vdir = mkdtempSync(join(tmpdir(), "es-db-"));
+    vdb = new Db(join(vdir, "db.sqlite"));
+    vdb.insertFile(FID, null);
+    vdb.recordView(FID, 1, "2026-04-18", HASH);
+    vdb.recordView(FID, 2, "2026-04-18", HASH);
+  });
+  afterEach(() => {
+    vdb.close();
+    rmSync(vdir, { recursive: true, force: true });
+  });
+
+  test("deleteAnalyticsForVersion removes only that version's rows", () => {
+    vdb.deleteAnalyticsForVersion(FID, 1);
+    const a = vdb.getFileAnalytics(FID);
+    expect(a.perVersion.map((v) => v.version)).toEqual([2]);
+    expect(a.totals.views).toBe(1);
+  });
+
+  test("deleteAnalyticsForFile clears both tables for that fileId", () => {
+    vdb.deleteAnalyticsForFile(FID);
+    const a = vdb.getFileAnalytics(FID);
+    expect(a).toEqual({
+      totals: { views: 0, uniqueDaily: 0 },
+      perDay: [],
+      perVersion: [],
+    });
+  });
+});
+
+describe("Db.getFileAnalytics()", () => {
+  let vdir: string;
+  let vdb: Db;
+  const FID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const HASH_A = "a".repeat(64);
+  const HASH_B = "b".repeat(64);
+
+  beforeEach(() => {
+    vdir = mkdtempSync(join(tmpdir(), "es-db-"));
+    vdb = new Db(join(vdir, "db.sqlite"));
+    vdb.insertFile(FID, null);
+  });
+  afterEach(() => {
+    vdb.close();
+    rmSync(vdir, { recursive: true, force: true });
+  });
+
+  test("empty file → zeros and empty arrays", () => {
+    const a = vdb.getFileAnalytics(FID);
+    expect(a).toEqual({
+      totals: { views: 0, uniqueDaily: 0 },
+      perDay: [],
+      perVersion: [],
+    });
+  });
+
+  test("same user, one version, one day, 3 hits: views=3, uniqueDaily=1", () => {
+    vdb.recordView(FID, 1, "2026-04-18", HASH_A);
+    vdb.recordView(FID, 1, "2026-04-18", HASH_A);
+    vdb.recordView(FID, 1, "2026-04-18", HASH_A);
+    const a = vdb.getFileAnalytics(FID);
+    expect(a.totals).toEqual({ views: 3, uniqueDaily: 1 });
+    expect(a.perDay).toEqual([{ day: "2026-04-18", views: 3, uniqueDaily: 1 }]);
+    expect(a.perVersion).toEqual([{ version: 1, views: 3, uniqueDaily: 1 }]);
+  });
+
+  test("option (ii): same user, v1 and v2 same day → totals.uniqueDaily=1", () => {
+    vdb.recordView(FID, 1, "2026-04-18", HASH_A);
+    vdb.recordView(FID, 2, "2026-04-18", HASH_A);
+    const a = vdb.getFileAnalytics(FID);
+    expect(a.totals).toEqual({ views: 2, uniqueDaily: 1 });
+    expect(a.perDay).toEqual([{ day: "2026-04-18", views: 2, uniqueDaily: 1 }]);
+    expect(a.perVersion).toEqual([
+      { version: 1, views: 1, uniqueDaily: 1 },
+      { version: 2, views: 1, uniqueDaily: 1 },
+    ]);
+  });
+
+  test("different days → perDay has multiple entries", () => {
+    vdb.recordView(FID, 1, "2026-04-17", HASH_A);
+    vdb.recordView(FID, 1, "2026-04-18", HASH_A);
+    const a = vdb.getFileAnalytics(FID);
+    expect(a.totals).toEqual({ views: 2, uniqueDaily: 2 });
+    expect(a.perDay).toEqual([
+      { day: "2026-04-17", views: 1, uniqueDaily: 1 },
+      { day: "2026-04-18", views: 1, uniqueDaily: 1 },
+    ]);
+  });
+
+  test("two different users same day → uniqueDaily=2", () => {
+    vdb.recordView(FID, 1, "2026-04-18", HASH_A);
+    vdb.recordView(FID, 1, "2026-04-18", HASH_B);
+    const a = vdb.getFileAnalytics(FID);
+    expect(a.totals).toEqual({ views: 2, uniqueDaily: 2 });
   });
 });
