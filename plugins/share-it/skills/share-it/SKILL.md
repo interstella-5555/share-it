@@ -9,16 +9,21 @@ A thin Claude Code skill over the share-it HTTP API. One job: upload a file and 
 
 **Operating principle:** assume the user has already set up the skill and just try to upload. Don't probe `/health`, don't validate config shape, don't ask questions ahead of time. If something goes wrong, THEN diagnose and ask. This keeps the happy path to a single `curl` + one printed line.
 
-## Config shape
+## Config resolution
 
-Lives at `~/.share-it/config.json`, mode `600`:
+Two sources, resolved **per field** with the environment taking precedence:
 
-```json
-{
-  "baseUrl": "https://share.example.app",
-  "apiKey": "<uuid>"
-}
-```
+1. **Environment variables** — `SHARE_IT_BASE_URL`, `SHARE_IT_API_KEY`. Either one wins over the file when set and non-empty.
+2. **Config file** — `~/.share-it/config.json`, mode `600`:
+
+   ```json
+   {
+     "baseUrl": "https://share.example.app",
+     "apiKey": "<uuid>"
+   }
+   ```
+
+Per-field means each value is resolved independently: `SHARE_IT_API_KEY` in the env with `baseUrl` in the file is valid, and vice versa. This lets a service on an external server (where no config file exists) run purely on the two env vars, while local use keeps working off the file.
 
 `baseUrl` — the user's share-it instance, no trailing slash. `apiKey` — the caller's active API key UUID, lowercase. Used as `X-Api-Key` on every request. Never log it, never echo it back unless the user asks.
 
@@ -30,7 +35,14 @@ Lives at `~/.share-it/config.json`, mode `600`:
    - A file the conversation just created / modified that matches the user's description.
    - Otherwise, list candidates from the conversation and ask.
 
-2. **Read the config.** `jq -r '.baseUrl,.apiKey' ~/.share-it/config.json`. If the file is missing or unparseable, skip to **Recover from failure** with cause = `no-config`.
+2. **Resolve the config.** Environment first, file as fallback, per field:
+
+   ```bash
+   BASE_URL="${SHARE_IT_BASE_URL:-$(jq -r '.baseUrl // empty' ~/.share-it/config.json 2>/dev/null)}"
+   API_KEY="${SHARE_IT_API_KEY:-$(jq -r '.apiKey // empty' ~/.share-it/config.json 2>/dev/null)}"
+   ```
+
+   `${VAR:-...}` falls through to the file when the env var is unset **or** empty; `// empty` turns a missing/absent file key into an empty string. If `BASE_URL` or `API_KEY` ends up empty after this, skip to **Recover from failure** with cause = `no-config`.
 
 3. **Resolve the MIME type from the file extension.** DO NOT rely on curl's default — on macOS curl often sends `application/octet-stream` for extensions not listed in `/etc/mime.types` (`.md`, `.json` etc.), and the server rejects that with `415`. Use this mapping — every upload MUST pass explicit `;type=<mime>`:
 
@@ -100,7 +112,7 @@ Inspect what we got:
 
 | Signal                                           | Cause                           |
 | ------------------------------------------------ | ------------------------------- |
-| Config file missing / malformed JSON             | `no-config`                     |
+| No env vars AND config missing / malformed JSON  | `no-config`                     |
 | DNS error, connection refused, timeout           | `instance-unreachable`          |
 | `502`/`503`/`504`, HTML body, non-JSON response  | `instance-down` (probe /health) |
 | `401 { error: "API key required" }`              | `missing-key` (config edge)     |
@@ -125,10 +137,12 @@ Each cause gets a tight prompt. Always state what went wrong concretely (status,
 
 **`no-config`** →
 
-> "No share-it config found at `~/.share-it/config.json`. Do you want to:
+> "No share-it config found — neither `SHARE_IT_BASE_URL` / `SHARE_IT_API_KEY` in the environment nor a usable `~/.share-it/config.json`. Do you want to:
 > (a) Paste an existing API key (and its base URL) I should save?
 > (b) Provide the instance `ADMIN_KEY` once so I can create a fresh API key for you?
 > (c) Point me at a different path where your config lives?"
+>
+> (On a server, setting `SHARE_IT_BASE_URL` + `SHARE_IT_API_KEY` in the environment is enough — no file needed.)
 
 On `(a)` / `(b)`, run the **Setup** flow below.
 
@@ -192,6 +206,8 @@ Only run when Recover decided we need new creds. **Don't run this on every invoc
    ```
 
 7. Confirm: `Config saved to ~/.share-it/config.json (owner-only permissions).` Then **immediately retry the original upload** so the user gets their URL without having to ask again.
+
+> Setup writes the file because it only runs interactively (local use). On a headless/external server, skip this flow entirely and export `SHARE_IT_BASE_URL` + `SHARE_IT_API_KEY` instead — the resolver in the Upload flow picks them up with no file on disk.
 
 ### Migration from legacy `~/.easy-share/config.json`
 
