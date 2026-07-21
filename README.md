@@ -52,6 +52,26 @@ docker run -d --name share-it \
   share-it
 ```
 
+## Deploy on Railway
+
+1. **Fork** this repo on GitHub.
+2. In Railway: **New Project → Deploy from GitHub repo** → pick your fork. Railway auto-detects the `Dockerfile` (Builder: `Dockerfile`, path `/Dockerfile`).
+3. **Add a Volume** to the service (Settings → Volumes): Mount Path `/data`, size e.g. `5 GB`.
+4. Set **Variables** (Settings → Variables):
+
+   | Name             | Value                                                   |
+   | ---------------- | ------------------------------------------------------- |
+   | `PROTECTED_MODE` | `true`                                                  |
+   | `ADMIN_KEY`      | a UUID — `uuidgen \| tr '[:upper:]' '[:lower:]'`        |
+   | `DATA_DIR`       | `/data` (match the volume mount path)                   |
+   | `BASE_URL`       | your public URL, e.g. `https://your-app.up.railway.app` |
+
+   Don't set `PORT` — Railway injects it and the app binds to it automatically.
+
+5. **Networking** (Settings → Networking): Generate a public domain. Use the same host in `BASE_URL`.
+6. **Healthcheck** (Settings → Deploy): set Healthcheck Path to `/health`.
+7. Deploy. Verify `GET /health` returns 200 and open `GET /docs`.
+
 ## API reference
 
 Every running instance serves live docs at **`GET /docs`** (Scalar-rendered OpenAPI). For example, locally: `http://localhost:3847/docs`.
