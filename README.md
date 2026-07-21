@@ -54,8 +54,10 @@ docker run -d --name share-it \
 
 ## Deploy on Railway
 
+The repo ships a [`railway.json`](railway.json) — Railway reads it on every deploy and auto-configures the build (Dockerfile) and deploy (healthcheck `/health`, restart policy). You only need to add a volume, set variables, and generate a domain.
+
 1. **Fork** this repo on GitHub.
-2. In Railway: **New Project → Deploy from GitHub repo** → pick your fork. Railway auto-detects the `Dockerfile` (Builder: `Dockerfile`, path `/Dockerfile`).
+2. In Railway: **New Project → Deploy from GitHub repo** → pick your fork.
 3. **Add a Volume** to the service (Settings → Volumes): Mount Path `/data`, size e.g. `5 GB`.
 4. Set **Variables** (Settings → Variables):
 
@@ -69,8 +71,9 @@ docker run -d --name share-it \
    Don't set `PORT` — Railway injects it and the app binds to it automatically.
 
 5. **Networking** (Settings → Networking): Generate a public domain so `RAILWAY_PUBLIC_DOMAIN` is populated.
-6. **Healthcheck** (Settings → Deploy): set Healthcheck Path to `/health`.
-7. Deploy. Verify `GET /health` returns 200 and open `GET /docs`.
+6. Deploy. Verify `GET /health` returns 200 and open `GET /docs`.
+
+> Config-as-code covers only build/deploy settings — the volume and variables above still have to be set in the dashboard.
 
 ## API reference
 
